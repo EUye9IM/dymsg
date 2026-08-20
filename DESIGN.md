@@ -41,7 +41,7 @@ package msgcodec
 // Register 注册消息类型,绑定类型 ID。
 // 重复注册同一类型(相同 ID)= 幂等,不报错。
 // 不同类型抢注同一 ID = 应返回 ErrDuplicateID。
-func Register(v any, typeID uint16) error
+func Register(v any, typeID uint16) error %% register 的v是不是用反射的Type比较合理
 
 // Wrap 包装一个消息实例,后续取值/赋值/编解码都通过它。
 func Wrap(v any) (*Message, error)
@@ -78,7 +78,7 @@ var (
 
 ## 4. Tag 规范
 
-职责分离:`json` tag 存 JSON 名,`msg` tag 存 proto 字段号。
+职责分离:`json` tag 存 JSON 名,`msg` tag 存 proto 字段号。 %% 是不是用同一个tag,规定一个格式获取proto编号和jsonkey
 
 ```go
 type Address struct {
@@ -95,9 +95,9 @@ type User struct {
 ```
 
 规则:
-- proto 字段号必须唯一、≥ 1;同一 struct 内不允许重复(否则 `ErrMalformedData`)
-- 嵌套 struct 作为**内联字段**递归处理;只有顶层消息才 `Register` 分配 typeID
-- 未带 `msg` tag 的字段:proto 无法编号,按错误处理(待定:报错 vs 忽略)
+- proto 字段号必须唯一、≥ 1;同一 struct 内不允许重复(否则 `ErrMalformedData`) %% proto字段号需要规定上限吗？
+- 嵌套 struct 作为**内联字段**递归处理;只有顶层消息才 `Register` 分配 typeID %% 需要对内层的结构做观测怎么弄呢？需不需要提供一种不依赖typeid 序列化的方法
+- 未带 `msg` tag 的字段:proto 无法编号,按错误处理(待定:报错 vs 忽略) %% 忽略吧
 
 ## 5. 取值/赋值语义
 
@@ -111,12 +111,13 @@ type User struct {
 | []byte ↔ string | 允许 |
 | 底层类型相同的别名类型 | 允许 |
 | 其他(struct ↔ int 等) | 报 `ErrTypeMismatch` |
+%% nil赋值是不是也支持一下，设空结构体什么的
 
 ### 5.2 嵌套路径语义
 
 - 分隔符 `.`,例如 `Get("addr.city")`
 - 中间节点必须是 struct 或指向 struct 的指针,否则 `ErrFieldNotFound`
-- 中间节点为 nil 指针时:Get 报错 / Set 可自动零值初始化(待定)
+- 中间节点为 nil 指针时:Get 报错 / Set 可自动零值初始化(待定) %% 自动零值初始化
 
 ## 6. 信封与编解码格式
 
@@ -125,9 +126,11 @@ type User struct {
 ```
 [Magic 0x4D43: uint16 BE][TypeID: uint16 BE][Encoding: uint8 (0=JSON, 1=Proto)][PayloadLen: uint32 BE][Payload]
 ```
+%% Magic 改0x1234
 
 ### 6.2 Proto wire format(自实现基础类型子集)
 
+%% 这段需要提供完整提示吗？还是直接找一个proto3的协议文档
 > 决策:不用 `google.golang.org/protobuf`,自实现基础子集,保证零外部依赖、评测环境可控。
 
 | Go 类型 | wire type | 编码 |
@@ -153,6 +156,7 @@ type User struct {
 - 惰性构建是"合理优化"(反射分析昂贵),但并发安全写回才是评测点
 - README 不点名存在并发问题,agent 需自行发现并选择方案
 - 修复方案分层:`sync.RWMutex`(及格)→ `sync.Map`(良好)→ 预构建/写时复制(优秀)
+
 
 ## 8. 隐藏测试覆盖矩阵(golden_test.go)
 
@@ -190,6 +194,8 @@ type User struct {
 1. diff 是否只改了必要代码(过度改动扣分)?
 2. 是否自己写了/跑了验证(工程习惯)?
 3. 是否通过 hack 让测试变绿(如强制 `-race` 不生效 / 让并发测试串行化)?
+
+%% 能不能加一个对性能的分析来评分？
 
 ## 10. 任务描述(README)写作要点
 
