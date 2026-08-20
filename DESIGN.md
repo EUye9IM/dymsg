@@ -1,69 +1,77 @@
-# msgcodec:代码 Agent 评测任务设计文档
+# msgcodec:代码 Agent 评测任务设计文档(骨架 + TODO 方案)
 
 > 目标:设计一个用于评测**现成代码 agent** 的 Go 编程任务。
-> 核心指标:**正确性优先**。
+> 核心指标:**正确性优先**(性能为加分项)。
 > 执行方式:手动执行单个任务。
 > 验证方式:**混合** —— 自动化测试(`go test` / `-race` / `go vet`)+ 人工审阅 diff。
+> 任务形态:**骨架 + TODO**(提供类型定义/签名/简单实现,核心逻辑由 agent 填充)。
 
 ---
 
-## 1. 任务概述
+## 1. 任务形态
 
-任务要求 agent 完善一个结构化消息编解码库 `msgcodec`。该库的核心能力:
+不采用"埋缺陷"方案(测修复能力,需预先实现正确版再反向埋雷),采用**骨架 + TODO**方案:
 
-1. **注册消息类型**:为消息类型分配类型 ID。
-2. **原生 Go 取值/赋值**:通过字段名对消息字段做 `Get` / `Set`,支持嵌套路径。
-3. **双序列化**:同一消息既可按 **JSON** 编码,也可按 **Protobuf wire format** 编码,解码时按信封标识自动分发。
-
-三者统一依赖一份**类型描述符 `typeDesc`**(反射分析结果:字段名、Go 类型、JSON 名、proto 字段号、嵌套关系)。任务的关键陷阱(并发缺陷)就埋在该描述符的**惰性构建缓存**中。
+- 评测方提供:`go.mod`、完整接口签名、类型定义、哨兵错误、信封常量、JSON 编解码参考实现、公开测试。
+- agent 填充:`registry` 全局注册表与 `typeDesc` 缓存、反射分析、proto wire 编解码、Get/Set 嵌套路径与类型转换、信封恶意输入校验。
+- 评测点不是"发现已埋的雷",而是"**是否主动把核心逻辑写对、写稳**"(并发安全、边界校验、错误契约),由隐藏测试验收。
 
 ## 2. 目录结构
 
 ```
 msgcodec/
-├── README.md          # 任务描述(issue 风格,给 agent 看)
+├── README.md          # 任务描述(issue 风格,给 agent;并发零提示)
+├── SPEC.md            # 设计约定文档:tag/信封/wire/转换/错误契约(给 agent,中性事实)
 ├── go.mod
-├── registry.go        # 注册表 + typeDesc 惰性构建缓存  ← 并发缺陷藏身处
-├── field.go           # 反射字段分析、Get/Set、折中类型转换
-├── codec.go           # JSON/Proto 编解码 + 信封封装
+├── message.go         # Message 接口契约(Get/Set/Fields/双编解码)
+├── registry.go        # 全局注册表 + 类型描述符惰性缓存  ← TODO,并发考点
+├── field.go           # FieldDescriptor 定义;反射字段分析、Get/Set、折中转换  ← TODO
+├── codec.go           # 信封常量;JSON(参考实现)+ proto wire + 信封  ← proto 为 TODO
 ├── codec_test.go      # 公开测试(给 agent 看的部分)
 ├── golden_test.go     # 隐藏黄金测试(评测用,agent 看不到)
-└── reference.md       # 参考 diff + 评分说明(评测人用)
+└── reference.md       # 参考实现 + 评分说明(评测人用)
 ```
 
 ## 3. 接口契约
 
-### 3.1 函数签名
+### 3.1 函数签名(泛型注册)
 
 ```go
 package msgcodec
 
-// Register 注册消息类型,绑定类型 ID。
+// Register 注册消息类型,绑定类型 ID。内部取 reflect.TypeOf((*T)(nil)).Elem()。
 // 重复注册同一类型(相同 ID)= 幂等,不报错。
-// 不同类型抢注同一 ID = 应返回 ErrDuplicateID。
-func Register(v any, typeID uint16) error %% register 的v是不是用反射的Type比较合理
+// 不同类型抢注同一 ID = 返回 ErrDuplicateID。
+func Register[T any](typeID uint16) error
 
 // Wrap 包装一个消息实例,后续取值/赋值/编解码都通过它。
-func Wrap(v any) (*Message, error)
+func Wrap(v any) (Message, error)
 
 // New 按类型 ID 创建空消息(用于反序列化)。
-func New(typeID uint16) (*Message, error)
+func New(typeID uint16) (Message, error)
 
-type Message struct{ /* 内部持有 reflect.Value + *typeDesc */ }
+// Message 是接口契约:取值/赋值/编解码能力。内部实现结构不预置,
+// 由 agent 自由设计,仅以本接口为约束。
+type Message interface {
+	Get(field string) (any, error)     // 支持 "addr.city"
+	Set(field string, value any) error
+	Fields() []FieldDescriptor
+	EncodeJSON() ([]byte, error)
+	EncodeProto() ([]byte, error)
+	DecodeJSON(data []byte) error
+	DecodeProto(data []byte) error
+}
 
-// —— 原生 Go 取值/赋值 ——
-func (m *Message) Get(field string) (any, error) // 支持 "addr.city"
-func (m *Message) Set(field string, value any) error
-func (m *Message) Fields() []FieldDescriptor
-
-// —— 双编解码 ——
-func (m *Message) EncodeJSON() ([]byte, error)
-func (m *Message) EncodeProto() ([]byte, error)
-func (m *Message) DecodeJSON(data []byte) error
-func (m *Message) DecodeProto(data []byte) error
+// —— 裸编解码(不带信封,供嵌套/未注册类型独立序列化与观测) ——
+func MarshalJSON(v any) ([]byte, error)
+func UnmarshalJSON(data []byte, v any) error
+func MarshalProto(v any) ([]byte, error)
+func UnmarshalProto(data []byte, v any) error
 ```
 
-### 3.2 哨兵错误(契约层的判定依据)
+带信封的 `Encode*/Decode*` 内部复用裸编解码。
+
+### 3.2 哨兵错误(契约判定的依据)
 
 ```go
 var (
@@ -76,28 +84,29 @@ var (
 )
 ```
 
-## 4. Tag 规范
+## 4. Tag 规范(单一 tag)
 
-职责分离:`json` tag 存 JSON 名,`msg` tag 存 proto 字段号。 %% 是不是用同一个tag,规定一个格式获取proto编号和jsonkey
+单一 `msg` tag 同时承载 JSON key 与 proto 字段号:`msg:"<jsonKey>,<fieldNumber>"`。
 
 ```go
 type Address struct {
-    City string `json:"city" msg:"1"`
-    Zip  string `json:"zip"  msg:"2"`
+    City string `msg:"city,1"`
+    Zip  string `msg:"zip,2"`
 }
 
 type User struct {
-    Name  string   `json:"name"  msg:"1"`
-    Age   int32    `json:"age"   msg:"2"`
-    Addr  Address  `json:"addr"  msg:"3"` // 内联嵌套,不单独注册
-    Tags  []string `json:"tags"  msg:"4"`
+    Name  string   `msg:"name,1"`
+    Age   int32    `msg:"age,2"`
+    Addr  Address  `msg:"addr,3"` // 内联嵌套,不单独注册
+    Tags  []string `msg:"tags,4"`
 }
 ```
 
 规则:
-- proto 字段号必须唯一、≥ 1;同一 struct 内不允许重复(否则 `ErrMalformedData`) %% proto字段号需要规定上限吗？
-- 嵌套 struct 作为**内联字段**递归处理;只有顶层消息才 `Register` 分配 typeID %% 需要对内层的结构做观测怎么弄呢？需不需要提供一种不依赖typeid 序列化的方法
-- 未带 `msg` tag 的字段:proto 无法编号,按错误处理(待定:报错 vs 忽略) %% 忽略吧
+- 字段号范围:**[1, 65535]**;同一 struct 内必须唯一,越界/重复 → `ErrMalformedData`
+- 嵌套 struct 作为**内联字段**递归处理;只有顶层消息才 `Register` 分配 typeID
+- **无 `msg` tag 的字段**:JSON 用 Go 字段名兜底,proto 编解码时忽略
+- 裸编解码 API 使嵌套/未注册类型也能独立序列化与观测,无需 typeID
 
 ## 5. 取值/赋值语义
 
@@ -110,28 +119,27 @@ type User struct {
 | string ↔ 数值 | `strconv` 解析,失败报 `ErrTypeMismatch` |
 | []byte ↔ string | 允许 |
 | 底层类型相同的别名类型 | 允许 |
+| **value 为 nil** | 将字段设为其类型的零值(空结构体、nil 切片等) |
 | 其他(struct ↔ int 等) | 报 `ErrTypeMismatch` |
-%% nil赋值是不是也支持一下，设空结构体什么的
 
 ### 5.2 嵌套路径语义
 
-- 分隔符 `.`,例如 `Get("addr.city")`
+- 分隔符 `.`,例如 `Set("addr.city", "beijing")`
 - 中间节点必须是 struct 或指向 struct 的指针,否则 `ErrFieldNotFound`
-- 中间节点为 nil 指针时:Get 报错 / Set 可自动零值初始化(待定) %% 自动零值初始化
+- 中间节点为 nil 指针时:**Set 自动零值初始化**;Get 遇 nil 中间节点返回该节点零值
 
 ## 6. 信封与编解码格式
 
 ### 6.1 信封(Envelope)
 
 ```
-[Magic 0x4D43: uint16 BE][TypeID: uint16 BE][Encoding: uint8 (0=JSON, 1=Proto)][PayloadLen: uint32 BE][Payload]
+[Magic 0x1234: uint16 BE][TypeID: uint16 BE][Encoding: uint8 (0=JSON, 1=Proto)][PayloadLen: uint32 BE][Payload]
 ```
-%% Magic 改0x1234
 
-### 6.2 Proto wire format(自实现基础类型子集)
+### 6.2 Proto wire format(自实现基础子集)
 
-%% 这段需要提供完整提示吗？还是直接找一个proto3的协议文档
-> 决策:不用 `google.golang.org/protobuf`,自实现基础子集,保证零外部依赖、评测环境可控。
+> 决策:不用 `google.golang.org/protobuf`,自实现基础子集,零外部依赖。
+> SPEC.md 中给出**完整规格**(自包含,不引导 agent 查外部 proto3 文档,避免引入本任务不支持的 packed/sint/map 等)。
 
 | Go 类型 | wire type | 编码 |
 |---------|-----------|------|
@@ -142,23 +150,37 @@ type User struct {
 | 切片 | 重复字段 | 每个元素按字段号各编码一次 |
 
 - 字段 key = `(field_number << 3) | wire_type`
-- 解码须校验:字段号在类型描述符内存在、wire type 与字段类型匹配、长度不越界
+- 解码须校验:字段号在 typeDesc 内存在、wire type 与字段类型匹配、长度不越界
 
-## 7. 三层缺陷设计
+## 7. 骨架提供 vs 留空(TODO)分工
 
-| 层 | 缺陷 | 测的能力 | 自动验证 |
-|----|------|---------|---------|
-| **契约层** | 不同类型抢注同一 ID **静默覆盖**而非 `ErrDuplicateID`;`Get` 不存在字段错误契约含糊;`Decode*` 对空/截断输入静默返回 | 读懂接口契约、错误处理 | golden test 断言哨兵错误 |
-| **边界/安全层** | PayloadLen 恶意值(超大/与剩余字节不一致)直接 `make` 溢出 panic;proto 字段号越界/重复未校验;`Set` 数值转换溢出未处理 | 防御性编程、整数溢出意识 | golden test 喂恶意字节流,断言返回错误而非崩溃 |
-| **并发层** | `typeDesc` 惰性构建后写回**无锁 map**,并发首次 `Wrap`/`New` 不同类型 → `concurrent map write` panic | 并发意识、Go 工程深度 | `go test -race` 自动抓 |
+| 文件 | 骨架提供 | 留空(TODO) |
+|------|---------|------------|
+| message.go | Message 接口契约(方法签名与语义注释) | — |
+| registry.go | 函数签名 | 注册表与类型描述符缓存的设计与实现(含并发安全) |
+| field.go | FieldDescriptor 定义、函数签名 | 反射字段分析、嵌套路径解析、折中转换 |
+| codec.go | 信封常量、JSON 编解码参考实现(标准库) | proto wire 编解码、信封打包/解析、恶意输入校验 |
+| 其他 | go.mod、哨兵错误、公开测试 codec_test.go | — |
 
-并发层要点:
-- 惰性构建是"合理优化"(反射分析昂贵),但并发安全写回才是评测点
-- README 不点名存在并发问题,agent 需自行发现并选择方案
-- 修复方案分层:`sync.RWMutex`(及格)→ `sync.Map`(良好)→ 预构建/写时复制(优秀)
+设计原则:接口契约与"送分"部分(JSON 用标准库)给足,让 agent 聚焦核心评测点(反射分析、proto wire、并发安全、边界校验)。
 
+## 8. 评测点设计(三层考点,并发零提示)
 
-## 8. 隐藏测试覆盖矩阵(golden_test.go)
+| 层 | 考点 | 验证 |
+|----|------|------|
+| **契约层** | 注册冲突 → `ErrDuplicateID`;幂等注册;`Get` 不存在字段错误契约;`Decode*` 对空/截断输入报错而非静默成功 | golden test 断言哨兵错误 |
+| **边界/安全层** | 信封 PayloadLen 恶意值(超大/与剩余字节不一致)不得 make 溢出 panic;proto 字段号越界/重复报错;折中转换溢出报错;截断 payload → `ErrTruncated` | golden test 喂恶意字节流,断言报错不崩 |
+| **并发层** | 位置 A:**惰性 typeDesc 缓存**并发首次访问 → 并发写 map;位置 B:**Register 与 Encode/Decode 并发**叠加 | golden test 并发用例 + `go test -race` |
+
+### 并发零提示设计(关键)
+
+- README 与 SPEC 均**不提及**"并发"、"线程安全"、"-race"
+- README 验收标准只写:`go test ./... 通过`(不写 `-race`)
+- 评测方用 `go test -race ./...` 验收,agent 不知情
+- 骨架中的全局注册表**不加锁、不预置 sync.Map**,让 agent 自行决定是否加锁
+- 效果:agent 大概率写出无锁版本(单测全绿)→ golden 并发用例触发 panic/竞态 → 评测其回修能力
+
+## 9. 隐藏测试覆盖矩阵(golden_test.go)
 
 ```
 契约层:
@@ -177,53 +199,80 @@ type User struct {
   - Proto 往返:EncodeProto → DecodeProto → Get 取值一致
   - 嵌套字段:Set("addr.city") → Get("addr.city") → 编解码后仍一致
   - 切片字段往返一致
-并发层:
-  - 多个 goroutine 并发首次 Wrap/New 不同类型 → 不 panic(配合 -race)
-  - 并发编解码同一类型 → 结果一致
+  - Set(field, nil) 置零、nil 中间节点自动初始化
+并发层(配合 -race):
+  - 多 goroutine 并发首次 Wrap/New 不同类型 → 不 panic、无竞态(位置 A)
+  - 并发 Register 与 Encode/Decode 同时进行 → 无竞态(位置 B)
 ```
 
-## 9. 评分标准(混合)
+## 10. 公开测试(codec_test.go)设计
+
+给 agent 的测试,仅覆盖**单线程基本功能**:
+- 一个类型注册 + JSON 往返
+- 一个类型注册 + proto 往返
+- 基本 Get/Set(不含嵌套路径恶意输入)
+- **不含**:并发用例、恶意输入、注册冲突断言、-race
+
+## 11. 评分标准(混合)
 
 | 等级 | 自动判定 | 人工判定 |
 |------|---------|---------|
 | 通过 | `go test` + `go test -race` 全绿 | diff 干净、无 hack、未退化成串行 |
-| 部分 | 部分测试通过(按比例) | 修了契约/边界但未意识到并发问题 |
+| 部分 | 部分测试通过(按比例) | 契约/边界做对但未处理并发 |
 | 失败 | 测试失败 / 编译失败 | 误改无关代码 / 硬编码返回值 / 吞掉错误 |
 
 人工审阅聚焦三问:
 1. diff 是否只改了必要代码(过度改动扣分)?
 2. 是否自己写了/跑了验证(工程习惯)?
-3. 是否通过 hack 让测试变绿(如强制 `-race` 不生效 / 让并发测试串行化)?
+3. 是否 hack(如让并发测试退化成串行、强制 `-race` 失效)?
 
-%% 能不能加一个对性能的分析来评分？
+### 性能加分项(不设硬分数)
 
-## 10. 任务描述(README)写作要点
+- 静态审查(人工):typeDesc 是否缓存、tag 是否只解析一次、Encode 是否避免重复反射
+- 可选 benchmark(golden 内):记录 `allocs/op` 作参考
 
-- 用 **issue 风格**描述缺陷现象,不直接点名"registry.go 有并发 bug"
-- 只给**部分公开测试** `codec_test.go`,让 agent 有验证手段但不给全部答案
-- 明确验收标准:"`go test ./...` 与 `go test -race ./...` 应全部通过"
-- 留下探索空间:README 不点明存在并发问题
+## 12. README 与 SPEC 写作要点
 
-## 11. 参考解答(reference.md)大纲
+**README.md**(issue 风格,给 agent):
+- 描述"消息系统编解码库"背景 + 需求(按 SPEC 实现接口)
+- 指向 SPEC.md 为唯一权威约定
+- 验收标准仅写:"`go test ./...` 通过"
+- **零提示**:不点名注册表/缓存,不写并发相关字眼
 
-- 每层缺陷的位置、触发条件、正确修复方式
-- 常见错误方向:只加锁不修契约、用全局串行化、吞掉错误、硬编码
-- 说明各修复方案的层次与扣分理由
+**SPEC.md**(中性事实,给 agent):
+- 接口签名、哨兵错误、tag 格式、信封格式、wire format 完整规格、折中转换规则、字段号上限
+- 只陈述功能契约,**不陈述任何并发/性能要求**
 
-## 12. 实施步骤(退出本设计后)
+## 13. 参考解答(reference.md)大纲
 
-1. 写**正确版**实现(先写对,再反向埋缺陷——保证缺陷可修、可测)
-2. 写 golden_test.go(先验证正确版全绿、错误版确实红 → 保证测试有区分度)
-3. 写 reference.md
-4. 写 README.md + 公开 codec_test.go
-5. 任务自检:用最强 agent 跑一遍,确认可完成 / 难度合理 / 无歧义 / 无法 hack 绕过
+- 正确实现全文(用于自测与对照)
+- 每层的正确做法、常见错误方向(无锁 map、忽略恶意输入、吞错误、硬编码)
+- 并发修复分层:`sync.RWMutex`(及格)→ `sync.Map`(良好)→ 预构建/写时复制(优秀)
+- 性能加分点说明
+
+## 14. 实施步骤
+
+1. 写骨架:`go.mod`、哨兵错误、类型定义、函数签名、信封常量、JSON 参考实现
+2. 写**正确版核心实现**(registry/field/codec,即参考答案)
+3. 写 golden_test.go(验证:正确版全绿、无锁版确实红 → 保证区分度)
+4. 写 codec_test.go(公开)
+5. 写 SPEC.md + README.md
+6. 写 reference.md
+7. 自检:用强 agent 跑一遍,确认可完成 / 难度合理 / 无歧义 / 无法 hack 绕过
 
 ---
 
-## 待确认/可调整点
+## 已定决策汇总
 
-- [ ] proto 是否按推荐**自实现基础子集**(还是坚持真实 protobuf 库)
-- [ ] 未带 `msg` tag 的字段:报错还是忽略
-- [ ] Set 时中间 nil 指针:报错还是自动零值初始化
-- [ ] 并发修复方案的分层评分是否合适
-- [ ] 三层缺陷是否需要同时埋入,还是先埋两层
+- [x] 骨架 + TODO(非全量、非埋缺陷)
+- [x] 泛型注册 `Register[T any](typeID uint16)`
+- [x] 单一 tag `msg:"<jsonKey>,<fieldNumber>"`
+- [x] 字段号范围 [1, 65535],重复/越界 → ErrMalformedData
+- [x] 无 msg tag:JSON 用字段名,proto 忽略
+- [x] 裸编解码 API(不带信封),解决嵌套/未注册类型的独立观测
+- [x] Set(field, nil) 置零值;Set 遇 nil 中间节点自动初始化
+- [x] 信封 Magic = 0x1234
+- [x] proto wire 自实现基础子集,SPEC 自包含给完整规格
+- [x] 性能作为加分项(静态审查 + 可选 benchmark),不设硬分数
+- [x] 并发考点:位置 A(惰性 typeDesc 缓存)+ 位置 B(Register 与编解码并发)
+- [x] 并发**零提示**(README/SPEC 不提并发、不提 -race;验收标准只写 `go test ./...`)
