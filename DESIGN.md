@@ -320,12 +320,12 @@ type Message interface {
 ## 14. 实施步骤
 
 1. 写骨架:`errors.go`、`schema.go`、`registry.go`、`message.go`(已完成)
-2. 写**正确版核心实现**(ParseSchema / Register / New / 动态消息存储 / 编解码,即参考答案)
-3. 写 golden_test.go(验证:正确版全绿、无锁版确实红 → 保证区分度)
-4. 写 codec_test.go(公开)
-5. 写 SPEC.md + README.md
-6. 写 reference.md
-7. 自检:用强 agent 跑一遍,确认可完成 / 难度合理 / 无歧义 / 无法 hack 绕过
+2. 写**正确版核心实现**(ParseSchema / Register / New / 动态消息存储 / 编解码,即参考答案)(已完成:msg.go/wire.go/proto.go/json.go)
+3. 写 golden_test.go(验证:正确版全绿、无锁版确实红 → 保证区分度)(已完成,`go test -race` 全绿;注入无锁版已验证触发 `concurrent map read and map write`)
+4. 写 codec_test.go(公开)(已完成)
+5. 写 SPEC.md + README.md(已完成)
+6. 写 reference.md(已完成)
+7. 自检:用强 agent 跑一遍,确认可完成 / 难度合理 / 无歧义 / 无法 hack 绕过(待做)
 
 ---
 
