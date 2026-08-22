@@ -153,7 +153,8 @@ var (
 - 路径中字段不存在 → `ErrFieldNotFound`。
 - 字段存在但未设置 → 返回 `nil`(不报错)。
 - repeated 下标越界 → `ErrIndexOutOfRange`。
-- 对非 repeated 字段使用下标,或对 repeated 字段不使用下标时的语义:前者按字段取整个值,后者(`"tags"`)返回整个数组对应的 `*Message`。
+- 对非 repeated 字段使用下标 → `ErrFieldNotFound`(下标仅适用于 repeated 字段)。
+- `Get("tags")`(repeated 字段不加下标)返回整个数组对应的 `*Message`。
 
 ### 5.2 `Set(field, value any) error`
 
@@ -164,7 +165,8 @@ var (
 - 标量字段:`value` 为对应原生类型或可转换类型(见第 6 节)。
 - 嵌套字段(`message`):`value` 为 `*Message`。
 - repeated 字段:`value` 为 `[]any`(标量元素)或 `[]*Message`(消息元素);也可传 `make([]*Message, x)` 得到长度为 `x` 的空消息数组。
-- 下标形式 `Set("tags[0]", v)`:设置单个元素。
+- 下标形式 `Set("tags[0]", v)`:设置单个元素;仅 repeated 字段允许下标。
+- 对非 repeated 字段使用下标 → `ErrFieldNotFound`。
 - 转换失败 → `ErrTypeMismatch`;字段不存在 → `ErrFieldNotFound`;下标越界 → `ErrIndexOutOfRange`。
 
 ### 5.3 `Value() any`
@@ -246,5 +248,5 @@ wire type:
 - 已知字段号但 wire type 与字段类型不符 → `ErrMalformedData`(防止修改已有字段类型的兼容性变更)。
 - 标量 repeated 字段同时接受 packed(wire type 2)与 unpacked(原 wire type)两种形式,可混用。
 - 字段未出现在数据中 → 保持未设置(presence = false);字段出现 → 设置为解码值(presence = true)。
-- 数据在字段中间被截断 → `ErrTruncated`。
-- 空输入 → `ErrTruncated`。
+- 0 字节输入是**合法空消息**的编码,解码成功(全部字段未设置),不报错。
+- 数据在字段中间被截断(长度声明超出实际剩余)→ `ErrTruncated`。

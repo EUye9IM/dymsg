@@ -76,12 +76,20 @@ var (
 	registry   = map[uint16]*MessageSchema{}
 )
 
-// Register registers a top-level message schema under its type ID. It returns
-// ErrDuplicateID if the type ID is already registered.
+// Register registers a top-level message schema under its type ID. Repeating
+// registration with the same content (structurally identical schema) is
+// idempotent and returns nil; a different schema under an already-used type ID
+// returns ErrDuplicateID.
 func Register(s MessageSchema) error {
+	if s.typeID == 0 {
+		return ErrMalformedData
+	}
 	registryMu.Lock()
 	defer registryMu.Unlock()
-	if _, ok := registry[s.typeID]; ok {
+	if prev, ok := registry[s.typeID]; ok {
+		if schemasEqual(prev, &s) {
+			return nil
+		}
 		return ErrDuplicateID
 	}
 	sc := s

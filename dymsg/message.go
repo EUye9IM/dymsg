@@ -37,11 +37,11 @@ func parsePath(path string) ([]pathSeg, error) {
 			name = part[:lb]
 			numStr := part[lb+1 : len(part)-1]
 			if numStr == "" {
-				return nil, ErrFieldNotFound
+				return nil, ErrIndexOutOfRange
 			}
 			n, err := strconv.Atoi(numStr)
 			if err != nil || n < 0 {
-				return nil, ErrFieldNotFound
+				return nil, ErrIndexOutOfRange
 			}
 			idx = n
 		}
@@ -105,20 +105,8 @@ func (m *Message) resolve(segs []pathSeg) (*Message, error) {
 				msg, _ = elem.(*Message)
 				continue
 			}
-			// A subscript on a non-repeated field addresses the whole value.
-			if isLast {
-				return wrapField(fs, fv), nil
-			}
-			if fs.Type != FieldMessage {
-				return nil, ErrFieldNotFound
-			}
-			schema = &fs.Schema
-			if fv != nil && fv.present {
-				msg = fv.value.(*Message)
-			} else {
-				msg = nil
-			}
-			continue
+			// 非 repeated 字段使用下标是非法路径。
+			return nil, ErrFieldNotFound
 		}
 
 		if isLast {
@@ -153,6 +141,9 @@ func (m *Message) Set(field string, value any) error {
 }
 
 func (m *Message) setSelf(value any) error {
+	if m.schema == nil {
+		return ErrFieldNotFound
+	}
 	if value == nil {
 		m.clear()
 		return nil
@@ -220,6 +211,11 @@ func (m *Message) descendForSet(seg pathSeg) (*Message, error) {
 		return nm, nil
 	}
 
+	// 非 repeated 字段使用下标是非法路径。
+	if seg.index >= 0 {
+		return nil, ErrFieldNotFound
+	}
+
 	if fs.Type != FieldMessage {
 		return nil, ErrFieldNotFound
 	}
@@ -243,7 +239,10 @@ func (m *Message) setLeaf(seg pathSeg, value any) error {
 	fs := &m.schema.fields[idx]
 	fv := &m.fields[idx]
 
-	if seg.index >= 0 && fs.Repeated {
+	if seg.index >= 0 {
+		if !fs.Repeated {
+			return ErrFieldNotFound
+		}
 		return m.setLeafIndex(fs, fv, seg.index, value)
 	}
 	return m.setFieldWhole(fs, fv, value)
@@ -369,7 +368,10 @@ func wrapField(fs *FieldSchema, fv *fieldValue) *Message {
 		return nil
 	}
 	if fs.Type == FieldMessage && !fs.Repeated {
-		return fv.value.(*Message)
+		if v, ok := fv.value.(*Message); ok && v != nil {
+			return v
+		}
+		return nil
 	}
 	return &Message{valueNode: true, value: fv.value}
 }

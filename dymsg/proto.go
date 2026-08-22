@@ -37,10 +37,11 @@ func (m *Message) DecodeProto(data []byte) error {
 	if m.schema == nil {
 		return ErrMalformedData
 	}
-	if len(data) == 0 {
-		return ErrTruncated
-	}
 	m.clear()
+	if len(data) == 0 {
+		// 0 字节是合法空消息的编码,解码为空消息(全部字段未设置)。
+		return nil
+	}
 
 	b := data
 	for len(b) > 0 {
