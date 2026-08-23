@@ -1,0 +1,8 @@
+{"resolved": true, "score": 0.7, "reason": "total_lines=2187, code_lines=2020, functions=77, avg_complexity=7.09"}
+{"resolved": false, "score": 0.08, "reason": "coverage=10.2% (in-package go test -cover), tests=2, test/src_ratio=0.04"}
+{"resolved": true, "score": 1.0, "reason": "blackbox pass=84/84 (fail=0, skip=0), pass_rate=100.0%, failed=[]"}
+{"resolved": true, "score": 1.0, "reason": "gofmt_unformatted=0, vet_warnings=0, todo=0, panic_todo=0, undocumented_exported=0"}
+{"resolved": true, "score": 1.0, "reason": "missing_funcs=[], missing_methods=[], missing_errors=[]"}
+{"resolved": true, "score": 1.0, "reason": "mutex=1, atomic=0, global_maps=[], registry_locked=True, concurrency_tests=2"}
+{"resolved": true, "score": 0.86, "reason": "exported=10, error_returning=9, swallowed_errors=2, panics=0"}
+{"resolved": true, "score": 0.71, "reason": "time_score=72.0, mem_score=70.0, over_alloc=[], over_bytes=[], ref_ns=316.2"}
