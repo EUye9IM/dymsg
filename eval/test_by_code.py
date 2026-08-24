@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
 """dymsg_test.py — 从多个维度评价 dymsg 包。
 
-维度(等权):
-  1. size         规模与复杂度
-  2. testing      测试充分性(workspace 自身测试覆盖率)
-  3. correctness  实现准确性(黑盒测试,含 -race 并发检测)
-  4. health       代码健康度(gofmt/vet/TODO/文档注释)
-  5. contract     契约一致性
-  6. performance  性能(go benchmark)
+维度(加权,权重见下方 WEIGHTS):
+  1. size         规模与复杂度(10%)
+  2. testing      测试充分性(workspace 自身测试覆盖率)(30%)
+  3. correctness  实现准确性(黑盒测试,含 -race 并发检测)(30%)
+  4. health       代码健康度(gofmt/vet/TODO/文档注释)(10%)
+  5. performance  性能(go benchmark)(20%)
 
 并发验证并入 correctness:黑盒测试以 -race 运行,存在数据竞争会直接判失败,
 不再用源码锁的静态 grep 来判断并发安全。
 
-用法:
-  python3 test_by_code.py [--no-go] [--quiet]
-    --no-go   跳过 go 工具调用(仅静态分析)
-    --quiet   只输出 JSON 到 stdout(不打印进度)
+运行方式:
+  python3 test_by_code.py
+  (不解析命令行参数,通过修改下方 USE_GO / QUIET / OUTPUT 全局常量来配置)
 
 输出:JSON(含 score / resolved / reason / dimensions,其中 dimensions 给出每维得分与详细数据)。
 纯 Python 3 标准库,零第三方依赖。
@@ -31,12 +29,11 @@ import tempfile
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DYMSG_DIR = os.path.join(BASE_DIR, "../workspace")               # Go module root (dymsg source)
 XTEST_DIR = os.path.join(BASE_DIR, "../test_files")              # external tests
-SPEC_PATH = os.path.join(XTEST_DIR, "readme.md")             # authoritative spec
 
 # ---- 全局配置(直接在此修改) ----
 USE_GO = True    # 是否调用 go 工具(gofmt / vet / go test -cover / go test -bench)
 QUIET = False    # 为 True 时不打印进度,只输出 JSONL
-OUTPUT = os.path.join(XTEST_DIR, "code_result.json")  # 输出文件路径;为空则写 stdout
+OUTPUT = os.path.join(BASE_DIR, "code_result.json")  # 输出文件路径;为空则写 stdout
 
 # --------------------------------------------------------------------------
 # 通用工具
@@ -398,82 +395,7 @@ def score_health(files, use_go):
 
 
 # --------------------------------------------------------------------------
-# 维度 4:契约一致性(SPEC 与源码)
-# --------------------------------------------------------------------------
-
-def _norm_sig(sig):
-    """把函数签名规整为可比较形式(去参数、接收者)。"""
-    sig = re.sub(r"\s+", " ", sig.strip())
-    sig = re.sub(r"^func\s+", "", sig)
-    sig = re.sub(r"\([^)]*\)\s*", "", sig, count=1)  # 接收者
-    sig = sig.split("(")[0].strip()
-    return sig
-
-
-def score_contract(files):
-    spec = ""
-    if os.path.exists(SPEC_PATH):
-        with open(SPEC_PATH, encoding="utf-8") as f:
-            spec = f.read()
-
-    # 从 SPEC 提取函数签名(代码块内的 func 行)
-    spec_funcs = set()
-    for m in re.finditer(r"^func\s+\([^)]*\)\s*([A-Z]\w*)\s*\([^)]*\)", spec, re.M):
-        spec_funcs.add(m.group(1))
-    for m in re.finditer(r"^func\s+([A-Z]\w*)\s*\([^)]*\)", spec, re.M):
-        spec_funcs.add(m.group(1))
-
-    # 源码导出函数
-    src_funcs = set()
-    for src in files.values():
-        for m in re.finditer(r"^func\s+(?:\([^)]*\)\s*)?([A-Z]\w*)\s*\(", src, re.M):
-            src_funcs.add(m.group(1))
-
-    missing = sorted(spec_funcs - src_funcs)
-    # 源码中 SPEC 未声明的新导出符号(不算扣分,仅记录)
-    extra = sorted(src_funcs - spec_funcs)
-
-    # Message 方法(可能分散在多个文件)
-    spec_methods = set()
-    for m in re.finditer(r"^func\s+\(m \*Message\)\s*([A-Z]\w*)\s*\(", spec, re.M):
-        spec_methods.add(m.group(1))
-    src_methods = set()
-    for src in files.values():
-        for m in re.finditer(r"^func\s+\(m \*Message\)\s*([A-Z]\w*)\s*\(", src, re.M):
-            src_methods.add(m.group(1))
-    method_missing = sorted(spec_methods - src_methods)
-
-    # 哨兵错误
-    spec_errors = set()
-    for m in re.finditer(r"\b(Err[A-Z]\w*)", spec):
-        spec_errors.add(m.group(1))
-    src_errors = set()
-    for src in files.values():
-        for m in re.finditer(r"\b(Err[A-Z]\w*)\s*=\s*errors\.New", src):
-            src_errors.add(m.group(1))
-    error_missing = sorted(spec_errors - src_errors)
-
-    total_declared = max(len(spec_funcs), 1)
-    matched = len(spec_funcs) - len(missing)
-    func_score = 100 * matched / total_declared
-    method_score = 100 if not method_missing else 50
-    err_score = 100 if not error_missing else max(0, 100 - 20 * len(error_missing))
-    score = 0.6 * func_score + 0.2 * method_score + 0.2 * err_score
-
-    return max(0, min(100, round(score, 1))), {
-        "spec_funcs": sorted(spec_funcs),
-        "src_funcs": sorted(src_funcs),
-        "missing_funcs": missing,
-        "extra_funcs": extra,
-        "missing_methods": method_missing,
-        "spec_errors": sorted(spec_errors),
-        "src_errors": sorted(src_errors),
-        "missing_errors": error_missing,
-    }
-
-
-# --------------------------------------------------------------------------
-# 维度 5:性能(benchmark)
+# 维度 4:性能(benchmark)
 # --------------------------------------------------------------------------
 
 def score_performance(use_go):
@@ -574,11 +496,19 @@ THRESHOLDS = {
     "testing": 0.70,
     "correctness": 1.0,
     "health": 0.90,
-    "contract": 0.80,
     "performance": 0.70,
 }
 
-DIM_ORDER = ["size", "testing", "correctness", "health", "contract", "performance"]
+DIM_ORDER = ["size", "testing", "correctness", "health", "performance"]
+
+# 各维度权重(和为 1.0)
+WEIGHTS = {
+    "size": 0.10,
+    "testing": 0.30,
+    "correctness": 0.30,
+    "health": 0.10,
+    "performance": 0.20,
+}
 
 
 BRIEF_REASONS = {
@@ -586,7 +516,6 @@ BRIEF_REASONS = {
     "testing": "覆盖率没达标",
     "correctness": "黑盒测试未全部通过",
     "health": "代码健康度未达标",
-    "contract": "契约一致性未达标",
     "performance": "性能未达标",
 }
 
@@ -647,13 +576,6 @@ def dim_reason(name, data):
             parts.append(f"todo={data['todo_count']}")
         if data.get("panic_todo"):
             parts.append(f"panic_todo={data['panic_todo']}")
-    elif name == "contract":
-        if data.get("missing_funcs"):
-            parts.append(f"missing_funcs=[{_list_summary(data['missing_funcs'])}]")
-        if data.get("missing_methods"):
-            parts.append(f"missing_methods=[{_list_summary(data['missing_methods'])}]")
-        if data.get("missing_errors"):
-            parts.append(f"missing_errors=[{_list_summary(data['missing_errors'])}]")
     elif name == "performance":
         parts.append(f"time={data.get('time_score')} mem={data.get('mem_score')}")
         if data.get("over_alloc"):
@@ -697,18 +619,13 @@ def main():
     if not quiet:
         print(f"health      : {s}")
 
-    s, d = score_contract(files_cache)
-    results["contract"] = (s, d)
-    if not quiet:
-        print(f"contract    : {s}  (missing={d['missing_funcs']})")
-
     s, d = score_performance(use_go)
     results["performance"] = (s, d)
     if not quiet:
         print(f"performance : {s}")
 
-    # 各项等权计算总分(0-1)
-    total_score = round(sum(results[name][0] for name in DIM_ORDER) / len(DIM_ORDER) / 100.0, 2)
+    # 各维度按权重计算总分(0-1)
+    total_score = round(sum(results[name][0] * WEIGHTS[name] for name in DIM_ORDER) / 100.0, 2)
     # resolved 以"实现准确性"(correctness)维度是否达标为准
     correctness_score = round(results["correctness"][0] / 100.0, 2)
     resolved = correctness_score >= THRESHOLDS["correctness"]

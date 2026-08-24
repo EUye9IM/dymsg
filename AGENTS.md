@@ -45,9 +45,10 @@ errors any way other than `errors.New` (the contract check greps for it).
 
 ## Evaluation scoring (test_by_code.py) — non-obvious rules
 
-Six equal-weight dimensions: `size`, `testing`, `correctness`, `health`,
-`contract`, `performance`. "Resolved" requires `correctness` == 1.0 (all black-box
-tests pass).
+Five equal-weight dimensions: `size`, `testing`, `correctness`, `health`,
+`performance`. "Resolved" requires `correctness` == 1.0 (all black-box
+tests pass). Contract consistency is enforced by the black-box tests, not a
+separate dimension.
 
 - **Correctness** also covers concurrency: the black-box suite runs with
   `go test -race`, so a data race in the implementation fails tests and drops this
