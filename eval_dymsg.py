@@ -373,7 +373,7 @@ def score_health(files, use_go):
 
 
 # --------------------------------------------------------------------------
-# 维度 4:契约一致性(SPEC 与源码)
+# 维度 4:契约一致性(规范文档与源码)
 # --------------------------------------------------------------------------
 
 def _norm_sig(sig):
@@ -386,7 +386,10 @@ def _norm_sig(sig):
 
 
 def score_contract(files):
-    spec_path = os.path.join(DYMSG_DIR, "SPEC.md")
+    # 权威规范来源:优先 README.md(规范并入 README),兼容旧 SPEC.md
+    spec_path = os.path.join(DYMSG_DIR, "README.md")
+    if not os.path.exists(spec_path):
+        spec_path = os.path.join(DYMSG_DIR, "SPEC.md")
     spec = ""
     if os.path.exists(spec_path):
         with open(spec_path, encoding="utf-8") as f:

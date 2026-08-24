@@ -5,4 +5,4 @@
 {"resolved": true, "score": 1.0, "reason": "missing_funcs=[], missing_methods=[], missing_errors=[]"}
 {"resolved": true, "score": 1.0, "reason": "mutex=1, atomic=0, global_maps=[], registry_locked=True, concurrency_tests=2"}
 {"resolved": true, "score": 0.86, "reason": "exported=10, error_returning=9, swallowed_errors=2, panics=0"}
-{"resolved": true, "score": 0.71, "reason": "time_score=72.0, mem_score=70.0, over_alloc=[], over_bytes=[], ref_ns=316.2"}
+{"resolved": false, "score": 0.69, "reason": "time_score=67.4, mem_score=70.0, over_alloc=[], over_bytes=[], ref_ns=288.3"}
