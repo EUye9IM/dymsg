@@ -3,11 +3,14 @@
 
 维度(等权):
   1. size         规模与复杂度
-  2. testing      测试充分性(覆盖率)
-  3. health       代码健康度(gofmt/vet/TODO/文档注释)
-  4. contract     契约一致性
-  5. concurrency  并发与安全
+  2. testing      测试充分性(workspace 自身测试覆盖率)
+  3. correctness  实现准确性(黑盒测试,含 -race 并发检测)
+  4. health       代码健康度(gofmt/vet/TODO/文档注释)
+  5. contract     契约一致性
   6. performance  性能(go benchmark)
+
+并发验证并入 correctness:黑盒测试以 -race 运行,存在数据竞争会直接判失败,
+不再用源码锁的静态 grep 来判断并发安全。
 
 用法:
   python3 test_by_code.py [--no-go] [--quiet]
@@ -215,13 +218,17 @@ def score_size(files):
 # --------------------------------------------------------------------------
 
 def run_blackbox_tests(use_go):
-    """在 dymsgxtest 目录运行 go test -json,解析事件流统计测试正确性。"""
+    """在 test_files 目录运行 go test -race -json,解析事件流统计测试正确性。
+
+    -race 把并发验证并入实现准确性:若被测代码存在数据竞争,相应测试会失败,
+    正确性得分随之下降。
+    """
     data = {"pass_count": 0, "fail_count": 0, "skip_count": 0,
             "test_total": 0, "failed_tests": [], "fail_output": {},
             "build_failed": False, "test_rc": None}
     if not use_go:
         return data
-    out, _, rc = run(["go", "test", "-json", "./..."], cwd=XTEST_DIR)
+    out, _, rc = run(["go", "test", "-race", "-json", "./..."], cwd=XTEST_DIR)
     data["test_rc"] = rc
     passed = failed = skipped = 0
     failed_tests = []
@@ -259,17 +266,25 @@ def run_blackbox_tests(use_go):
 
 
 def score_testing(use_go):
-    """测试充分性:外部测试(test_files)驱动出的 dymsg 覆盖率 + 测试数量 + 行数比。"""
+    """测试充分性:workspace(dymsg 源码)自身的测试覆盖率。
+
+    本项目是对 workspace 内 dymsg 实现代码的评价,因此测试充分性衡量的是
+    workspace 自身的单元测试(workspace/*_test.go)对 dymsg 源码的覆盖,
+    而不是外部黑盒测试(test_files)的覆盖。当前 workspace 没有任何测试,
+    所以该维度目前覆盖率为 0.0%(什么也没覆盖到)。
+    """
     data = {"coverage": None, "test_count": 0, "test_lines": 0, "src_lines": 0}
     if use_go:
-        # 测试位于 test_files(外部测试包),用 -coverpkg 统计 dymsg 源码覆盖率
+        # 在 workspace(dymsg 模块根)内运行 go test 收集 dymsg 自身的覆盖率。
+        # 测试与被测包同模块,无需 -coverpkg;workspace 当前无 _test.go,
+        # go tool cover 会输出 total: 0.0%,即"没有覆盖到任何语句"。
         fd, cover_path = tempfile.mkstemp(suffix=".out")
         os.close(fd)
         try:
-            run(["go", "test", "-count=1", "-coverpkg=dymsg/...",
-                 "-coverprofile=" + cover_path, "./..."], cwd=XTEST_DIR)
+            run(["go", "test", "-count=1", "-coverprofile=" + cover_path,
+                 "./..."], cwd=DYMSG_DIR)
             out, _, _ = run(["go", "tool", "cover", "-func=" + cover_path],
-                            cwd=XTEST_DIR)
+                            cwd=DYMSG_DIR)
             m = re.search(r"total:\s*\(statements\)\s*([\d.]+)%", out)
             if m:
                 data["coverage"] = float(m.group(1))
@@ -279,18 +294,18 @@ def score_testing(use_go):
             except OSError:
                 pass
 
-    # 外部测试文件统计(test_files 目录下的 _test.go)
+    # 统计 workspace 自身的测试文件(*_test.go):测试数量与行数
     test_files = []
-    for name in sorted(os.listdir(XTEST_DIR)):
+    for name in sorted(os.listdir(DYMSG_DIR)):
         if name.endswith("_test.go"):
             test_files.append(name)
     test_src = ""
     for name in test_files:
-        with open(os.path.join(XTEST_DIR, name), encoding="utf-8") as f:
+        with open(os.path.join(DYMSG_DIR, name), encoding="utf-8") as f:
             test_src += f.read()
     data["test_count"] = len(re.findall(r"^func\s+Test\w+", test_src, re.M))
     data["test_lines"] = len(test_src.splitlines())
-    for name, src in files_cache.items():
+    for name, src in (files_cache or {}).items():
         data["src_lines"] += len(src.splitlines())
 
     cov_score = data["coverage"] if data["coverage"] is not None else 0
@@ -458,48 +473,7 @@ def score_contract(files):
 
 
 # --------------------------------------------------------------------------
-# 维度 5:并发与安全
-# --------------------------------------------------------------------------
-
-def score_concurrency(files):
-    all_src = "\n".join(files.values())
-    data = {}
-
-    data["mutex"] = len(re.findall(r"sync\.(Mutex|RWMutex)", all_src))
-    data["atomic"] = len(re.findall(r"sync/atomic|atomic\.", all_src))
-
-    # 全局可变状态(var xxx = map[] ...)
-    globals_maps = re.findall(r"var\s+(\w+)\s*=\s*map\[", all_src)
-    data["global_maps"] = globals_maps
-
-    # 全局 map 是否被锁保护(近似:检查含 mutex 的文件同时含该 map 的锁)
-    # 简化:检查 registry 相关代码里 RWMutex 的存在(已知设计)
-    reg_has_lock = bool(re.search(r"registryMu\.(RLock|Lock)", files.get("dymsg.go", "")))
-    data["registry_locked"] = reg_has_lock
-
-    # 并发测试
-    test_src = ""
-    for name in os.listdir(XTEST_DIR):
-        if name.endswith("_test.go"):
-            with open(os.path.join(XTEST_DIR, name), encoding="utf-8") as f:
-                test_src += f.read()
-    conc_tests = re.findall(r"^func\s+(TestConcurrent\w*|TestRegisterConcurrent\w*)", test_src, re.M)
-    data["concurrency_tests"] = conc_tests
-
-    score = 40.0
-    if data["mutex"] > 0:
-        score += 25
-    if reg_has_lock:
-        score += 20
-    if len(conc_tests) > 0:
-        score += 15
-    if data["global_maps"] and not reg_has_lock:
-        score -= 20
-    return max(0, min(100, round(score, 1))), data
-
-
-# --------------------------------------------------------------------------
-# 维度 6:性能(benchmark)
+# 维度 5:性能(benchmark)
 # --------------------------------------------------------------------------
 
 def score_performance(use_go):
@@ -587,7 +561,7 @@ def score_performance(use_go):
 # 主流程
 # --------------------------------------------------------------------------
 
-files_cache = None
+files_cache: dict | None = None  # 在 main() 中赋值为 read_go_files() 的结果
 
 
 # --------------------------------------------------------------------------
@@ -601,11 +575,10 @@ THRESHOLDS = {
     "correctness": 1.0,
     "health": 0.90,
     "contract": 0.80,
-    "concurrency": 0.80,
     "performance": 0.70,
 }
 
-DIM_ORDER = ["size", "testing", "correctness", "health", "contract", "concurrency", "performance"]
+DIM_ORDER = ["size", "testing", "correctness", "health", "contract", "performance"]
 
 
 BRIEF_REASONS = {
@@ -614,7 +587,6 @@ BRIEF_REASONS = {
     "correctness": "黑盒测试未全部通过",
     "health": "代码健康度未达标",
     "contract": "契约一致性未达标",
-    "concurrency": "并发安全未达标",
     "performance": "性能未达标",
 }
 
@@ -657,11 +629,6 @@ def main():
     results["contract"] = (s, d)
     if not quiet:
         print(f"contract    : {s}  (missing={d['missing_funcs']})")
-
-    s, d = score_concurrency(files_cache)
-    results["concurrency"] = (s, d)
-    if not quiet:
-        print(f"concurrency : {s}")
 
     s, d = score_performance(use_go)
     results["performance"] = (s, d)
