@@ -17,7 +17,7 @@
     --no-go   跳过 go 工具调用(仅静态分析)
     --quiet   只输出 JSON 到 stdout(不打印进度)
 
-输出:JSON(含 meta / dimensions / total_score)。
+输出:JSON(含 score / resolved / reason / dimensions,其中 dimensions 给出每维得分与详细数据)。
 纯 Python 3 标准库,零第三方依赖。
 """
 
@@ -591,6 +591,78 @@ BRIEF_REASONS = {
 }
 
 
+def _list_summary(items, limit=5):
+    """把列表项格式化为紧凑字符串,超出 limit 时截断。"""
+    if not items:
+        return ""
+    shown = [str(x) for x in items[:limit]]
+    s = ", ".join(shown)
+    if len(items) > limit:
+        s += f", ...(+{len(items) - limit})"
+    return s
+
+
+def dim_reason(name, data):
+    """按维度生成未达标时的详细原因,尽量带上具体数据。"""
+    parts = [BRIEF_REASONS[name]]
+    if name == "size":
+        parts.append(
+            f"total_lines={data.get('total_lines')} "
+            f"funcs={data.get('functions')} "
+            f"avg_complexity={data.get('avg_complexity')}"
+        )
+        if data.get("big_functions"):
+            parts.append(f"big_funcs=[{_list_summary(data['big_functions'])}]")
+        per = data.get("per_file") or {}
+        if per:
+            files = ", ".join(f"{k}:{v['code']}" for k, v in list(per.items())[:8])
+            parts.append(f"code_lines/files={{{files}}}")
+    elif name == "testing":
+        cov = data.get("coverage")
+        parts.append(
+            f"coverage={cov if cov is not None else 0.0}% "
+            f"tests={data.get('test_count')} "
+            f"test_lines={data.get('test_lines')} "
+            f"ratio={data.get('test_to_src_ratio')}"
+        )
+        if data.get("test_files"):
+            parts.append(f"test_files=[{_list_summary(data['test_files'])}]")
+    elif name == "correctness":
+        if data.get("build_failed"):
+            parts.append(f"build_failed=True(rc={data.get('test_rc')})")
+        parts.append(
+            f"pass={data.get('pass_count')}/{data.get('test_total')} "
+            f"fail={data.get('fail_count')}"
+        )
+        if data.get("failed_tests"):
+            parts.append(f"failed=[{_list_summary(data['failed_tests'])}]")
+    elif name == "health":
+        if data.get("gofmt_unformatted"):
+            parts.append(f"gofmt=[{_list_summary(data['gofmt_unformatted'])}]")
+        if data.get("vet_warnings"):
+            parts.append(f"vet={len(data['vet_warnings'])}")
+        if data.get("undocumented_exported"):
+            parts.append(f"undocumented=[{_list_summary(data['undocumented_exported'], 3)}]")
+        if data.get("todo_count"):
+            parts.append(f"todo={data['todo_count']}")
+        if data.get("panic_todo"):
+            parts.append(f"panic_todo={data['panic_todo']}")
+    elif name == "contract":
+        if data.get("missing_funcs"):
+            parts.append(f"missing_funcs=[{_list_summary(data['missing_funcs'])}]")
+        if data.get("missing_methods"):
+            parts.append(f"missing_methods=[{_list_summary(data['missing_methods'])}]")
+        if data.get("missing_errors"):
+            parts.append(f"missing_errors=[{_list_summary(data['missing_errors'])}]")
+    elif name == "performance":
+        parts.append(f"time={data.get('time_score')} mem={data.get('mem_score')}")
+        if data.get("over_alloc"):
+            parts.append(f"over_alloc=[{_list_summary(data['over_alloc'])}]")
+        if data.get("over_bytes"):
+            parts.append(f"over_bytes=[{_list_summary(data['over_bytes'])}]")
+    return " | ".join(parts)
+
+
 def main():
     global files_cache
 
@@ -641,18 +713,21 @@ def main():
     correctness_score = round(results["correctness"][0] / 100.0, 2)
     resolved = correctness_score >= THRESHOLDS["correctness"]
 
-    # 未达阈值的维度,附上简要原因
+    # 未达阈值的维度,附上详细原因;同时把每维得分与数据一起写入输出
     reason_parts = []
+    dimensions_detail = {}
     for name in DIM_ORDER:
-        s0, _ = results[name]
+        s0, d = results[name]
         score01 = round(s0 / 100.0, 2)
+        dimensions_detail[name] = {"score": score01, **d}
         if score01 < THRESHOLDS[name]:
-            reason_parts.append(f"{name}: {BRIEF_REASONS[name]}")
+            reason_parts.append(f"{name}: {dim_reason(name, d)}")
 
     out_obj = {
         "score": total_score,
         "resolved": resolved,
         "reason": "; ".join(reason_parts),
+        "dimensions": dimensions_detail,
     }
 
     text = json.dumps(out_obj, ensure_ascii=False) + "\n"
