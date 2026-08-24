@@ -29,8 +29,8 @@ import sys
 import tempfile
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DYMSG_DIR = os.path.join(BASE_DIR, "workspace")               # Go module root (dymsg source)
-XTEST_DIR = os.path.join(BASE_DIR, "test_files")              # external tests
+DYMSG_DIR = os.path.join(BASE_DIR, "../workspace")               # Go module root (dymsg source)
+XTEST_DIR = os.path.join(BASE_DIR, "../test_files")              # external tests
 SPEC_PATH = os.path.join(XTEST_DIR, "readme.md")             # authoritative spec
 
 # ---- 全局配置(直接在此修改) ----
