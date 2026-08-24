@@ -95,6 +95,8 @@ func makeSlice(ft FieldType, n int) any {
 		return make([]string, n)
 	case FieldBytes:
 		return make([][]byte, n)
+	case FieldMessage:
+		return make([]*Message, n)
 	}
 	return nil
 }
