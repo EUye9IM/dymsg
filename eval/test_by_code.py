@@ -644,7 +644,7 @@ def main():
         "score": total_score,
         "resolved": resolved,
         "reason": "; ".join(reason_parts),
-        "dimensions": dimensions_detail,
+        #"dimensions": dimensions_detail,
     }
 
     text = json.dumps(out_obj, ensure_ascii=False) + "\n"
