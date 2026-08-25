@@ -2,8 +2,15 @@
 
 - 日期：2026-08-25
 - 评测对象：`archive/impl-flash-0.tar.gz`（FLASH）与 `archive/impl-pro-0.tar.gz`（PRO）
-- 评测脚本：`eval/test_by_code.py`（加权：size 10% / testing 30% / correctness 30% / health 10% / performance 20%）
+- 评测脚本：`eval/test_by_code.py`
 - 环境：go 1.27.0，黑盒测试 `go test -race -count=1`，共 125 个用例
+
+> **评测体系更新记录（2026-08-25 晚）**：原 `size` 维度已更名为 **`architecture`**，改为基于
+> `go/ast + go/types` 静态分析（函数行数 P90、圈复杂度分级、文件依赖环、上帝文件占比、
+> 全局状态），由 `test_files/archcheck` 提供精确数据；权重同步调整为
+> **architecture 30% / testing 20% / correctness 30% / health 10% / performance 10%**。
+> **本报告第 1-5 节及 A-C 节的分值均为旧体系（size + 权重 10/30/30/10/20）下的历史结果，
+> 与新体系不可直接对比**；新体系下的重评见文末 **D 节**。
 
 ---
 
@@ -21,7 +28,7 @@
 
 ---
 
-## 2. 五维得分对比
+## 2. 五维得分对比（旧体系：size + 权重 10/30/30/10/20）
 
 | 维度（权重） | FLASH | PRO | 胜出 |
 |---|---|---|---|
@@ -107,3 +114,98 @@
 - **两者共同短板**：边界错误码语义（Append/Clear 的错误码、`Set("rs[0]", nil)`）、空配置解析（`ParseSchema({})`）——这些是达成 `resolved`（correctness = 1.0）必须补齐的部分。
 
 > 附注：评测期间 `workspace/` 目录被切换到 FLASH 实现以运行黑盒测试；`workspace-ref/` 为原参考实现。
+
+---
+
+# 追加：-1 版本评测（2026-08-25）
+
+`archive/impl-flash-1.tar.gz` 与 `archive/impl-pro-1.tar.gz`，评测环境与方法同上。**本节的
+得分与 A-C 结论均为旧体系（size 维度 + 权重 10/30/30/10/20）的历史结果**，新体系重评见 D 节。
+
+## A. 与 -0 版本的得分对比
+
+| 维度（权重） | flash-0 | **flash-1** | 变化 | pro-0 | **pro-1** | 变化 |
+|---|---|---|---|---|---|---|
+| size（10%） | 47.4 | **60.6** | +13.2（达标） | 57.6 | 57.5 | -0.1 |
+| testing（30%） | 68.4 | **72.0** | +3.6（达标） | 0 | **53.5** | +53.5 |
+| correctness（30%） | 93.6 | **91.2** | -2.4 | 89.6 | **92.0** | +2.4 |
+| health（10%） | 0 | **100** | +100（达标） | 40 | **100** | +60（达标） |
+| performance（20%） | 50.7 | **55.5** | +4.8 | 47.4 | **53.2** | +5.8 |
+| **加权总分** | 0.63 | **0.76** | +0.13 | 0.46 | **0.70** | +0.24 |
+| resolved | False | False | — | False | False | — |
+
+- 两个 -1 版本均大幅提升；**PRO-1 进步最大（+0.24）**——补上了测试（coverage 56.8%）、修复了数组输入等转换缺陷、health 从 40 到 100。
+- **FLASH-1 仍然领先（0.76 vs 0.70）**：size/testing/health 三维达标，是四个版本中唯一多个维度达标的实现；但 correctness 出现小幅回归。
+
+## B. -1 版本之间的失败测试对比
+
+| 失败测试 | FLASH-1 | PRO-1 |
+|---|---|---|
+| TestParseSchemaEmpty（空配置） | 通过 | 失败（`{}` 报 ErrMalformedData） |
+| TestParseSchemaMalformed/message_null_schema | 失败（**回归**，null schema 未报错） | 通过 |
+| TestAppend | 失败（带索引路径错误码：ErrTypeMismatch vs ErrFieldNotFound） | 失败（空路径错误码） |
+| TestClearPathIdempotentWhenParentUnset | 失败（unset 嵌套 unknown 返回 nil） | 失败（unset 索引路径错误码） |
+| TestClearRepeatedElement | 失败（标量 repeated 元素返回 nil） | 失败（索引路径错误码） |
+| TestConvertOverflowEdges | 通过 | 失败（typed-nil → int32 返回 nil） |
+| TestConvertMessageTypedNil | 失败（**回归**） | 失败 |
+| TestSetElementMessage | 失败（标量元素 nil 返回 nil） | 失败（nil 元素设置错误码） |
+| TestSetIndexedNested | 失败 | 通过（已修复） |
+| TestClearIndexedNested | 失败 | 失败 |
+| TestDecodeJSONWhitespace | 失败（**回归**，错误码） | 失败（错误码） |
+| TestSetSelfTypedNil | 失败（**回归**） | 失败 |
+| TestGetIndexedNestedStates | 通过（已修复） | 通过 |
+
+**失败数**：FLASH-1 = 11（其中 **4 个为 -0 时代通过、重构引入的回归**：message_null_schema、TestConvertMessageTypedNil、TestDecodeJSONWhitespace、TestSetSelfTypedNil）；PRO-1 = 10（较 -0 修复 3 个：TestSetRepeated / TestSetMessageSliceVariants / TestSetIndexedNested）。
+
+## C. 结论（-1 版本）
+
+- **FLASH-1 仍整体更优（0.76 vs 0.70）**：达标维度更多（size/testing/health），testing 覆盖率更高（66.0%），性能略好（55.5 vs 53.2）。但重构中引入 4 个功能回归（typed-nil、错误码、schema null 校验），correctness 不升反降（93.6→91.2）。
+- **PRO-1 进步最大**：从 0.46 到 0.70，正确性反超为 115/125 vs 114/125，工程规范（模块化 + schema 感知）依旧，且补齐了测试。主要短板仍是边界错误码与 typed-nil 语义。
+- **两者共同短板不变**：边界错误码语义（Append/Clear）、typed-nil 处理、`ParseSchema({})` 空配置——达成 `resolved`（correctness = 1.0）仍需补齐这些。
+- 若目标是当前加权评分，**FLASH-1 是最佳版本（0.76）**；若关注正确性上限与可维护性平衡，**PRO-1** 的修复方向更健康（无回归、结构更好），距离 resolved 同样有差距。
+
+---
+
+## D. 新体系重评 -1 版本（architecture 30% / testing 20% / correctness 30% / health 10% / performance 10%）
+
+用改造后的 `architecture` 维度（`test_files/archcheck`，go/ast + go/types 精确分析）对 -1 版本重新评分：
+
+| 维度（权重） | FLASH-1 | PRO-1 |
+|---|---|---|
+| architecture（30%） | 59.4 | 69.6 |
+| testing（20%） | 72.0（覆盖率 66.0%） | 53.5（覆盖率 56.8%） |
+| correctness（30%） | 91.2（114/125） | 92.0（115/125） |
+| health（10%） | 100 | 100 |
+| performance（10%） | 56.6 | 55.6 |
+| **加权总分** | **0.75** | **0.75** |
+| resolved | False | False |
+
+### D.1 architecture 明细（新体系核心）
+
+| 指标 | FLASH-1 | PRO-1 |
+|---|---|---|
+| 上帝文件占比 | dymsg.go **42.0%** | message.go **22.3%** |
+| 文件数 | 4 | 7 |
+| 依赖环 | **0**（json/message/proto 单向依赖 dymsg.go） | 1 个（5 文件强连通环） |
+| 平均圈复杂度 | 7.81 | 7.29 |
+| 复杂度 >15 函数数 | 12 | 15 |
+| P90 函数行数 | 65 | 55 |
+| 4 子分（复杂度/行数/模块/依赖） | 33.5 / 85.0 / 48.9 / 100 | 34.7 / 95.0 / 100 / 80 |
+
+**架构洞察**：go/types 精确解析还原了正则启发式无法识别的真相——FLASH-1 依赖**无环**（但被 42% 上帝文件拖累），PRO-1 文件更均衡（22.3%）但存在一个 5 文件强连通依赖环。
+
+### D.2 权重敏感性（同一组实现）
+
+| 权重方案 | FLASH-1 | PRO-1 | 差距 |
+|---|---|---|---|
+| arch 10% / perf 20% | 0.76 | 0.70 | 0.06 |
+| arch 20% / perf 10% | 0.77 | 0.73 | 0.04 |
+| **arch 30% / testing 20%** | **0.75** | **0.75** | **0.00** |
+
+架构权重每升 10%，PRO 的架构优势逐步抵消 FLASH 的测试优势，在 30/20 组合下恰好打平。
+
+### D.3 结论（新体系）
+
+- **新体系下 FLASH-1 与 PRO-1 平分（0.75 = 0.75）**，且原因完全对称：FLASH 测试更充分（72 vs 53.5）、PRO 架构更优（69.6 vs 59.4）。
+- 旧体系"FLASH 明显领先"的结论已不成立——主要原因是架构维度从 10% 提到 30%，放大了 PRO 的模块化优势。
+- `resolved` 仍为 False：两者 correctness 均未达 1.0，共同短板依旧是边界错误码语义、typed-nil 处理、`ParseSchema({})` 空配置。

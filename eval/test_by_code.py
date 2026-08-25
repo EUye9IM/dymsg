@@ -2,11 +2,11 @@
 """dymsg_test.py — 从多个维度评价 dymsg 包。
 
 维度(加权,权重见下方 WEIGHTS):
-  1. size         规模与复杂度(10%)
-  2. testing      测试充分性(workspace 自身测试覆盖率)(30%)
+  1. architecture 代码架构(go/ast+go/types 静态分析)(30%)
+  2. testing      测试充分性(workspace 自身测试覆盖率)(20%)
   3. correctness  实现准确性(黑盒测试,含 -race 并发检测)(30%)
   4. health       代码健康度(gofmt/vet/TODO/文档注释)(10%)
-  5. performance  性能(go benchmark)(20%)
+  5. performance  性能(go benchmark)(10%)
 
 并发验证并入 correctness:黑盒测试以 -race 运行,存在数据竞争会直接判失败,
 不再用源码锁的静态 grep 来判断并发安全。
@@ -118,7 +118,7 @@ def read_go_files():
 
 
 # --------------------------------------------------------------------------
-# 维度 1:规模与复杂度
+# 维度 1:架构(go/ast + go/types 静态分析)
 # --------------------------------------------------------------------------
 
 def _count_lines(src):
@@ -168,28 +168,68 @@ def _extract_funcs(files):
     return funcs
 
 
-def score_size(files):
-    total_lines = code_lines = 0
-    per_file = {}
-    for name, src in files.items():
-        t, c, b = _count_lines(src)
-        total_lines += t
-        code_lines += c
-        per_file[name] = {"total": t, "code": c, "blank": b}
+def _build_arch_report(files):
+    """无 go 环境时的正则近似 report(结构与 archcheck JSON 一致)。"""
     funcs = _extract_funcs(files)
+    lines = [(name, len(src.splitlines())) for name, src in files.items()]
+    func_list = [{
+        "name": f["name"], "file": f["file"], "line": f["line"],
+        "lines": f["end_line"] - f["line"] + 1,
+        "complexity": f["complexity"], "exported": f["exported"],
+    } for f in funcs]
+    file_info = [{
+        "name": name, "lines": ln,
+        "funcs": sum(1 for x in func_list if x["file"] == name),
+        "exports": 0, "vars": [],
+    } for name, ln in lines]
+    return {
+        "files": file_info, "functions": func_list,
+        "deps": [], "dep_cycles": [], "package_vars": [],
+    }
+
+
+def score_architecture(files, use_go):
+    """代码架构:函数行数 / 圈复杂度分级 / go/types 符号依赖分析。
+
+    四个子分(权重 40/25/20/15):
+      - 复杂度:平均圈复杂度映射 + 复杂度>15 的函数数惩罚
+      - 函数行数:P90 函数长度(超标每行扣 1)+ 超长函数(max>150)惩罚
+      - 模块划分:最大文件行数占比(上帝文件)+ 文件数区间
+      - 依赖健康:文件依赖环数 + 包级 var(非哨兵错误)数量
+    go/types 精确分析由 test_files/archcheck 提供;USE_GO=False 时
+    降级为正则近似(不产出依赖环/全局状态)。
+    """
+    report = None
+    if use_go:
+        out, _, _ = run(["go", "run", "./archcheck", "../workspace"], cwd=XTEST_DIR)
+        try:
+            report = json.loads(out)
+        except Exception:
+            report = None
+    if report is None:
+        report = _build_arch_report(files)
+
+    funcs = report["functions"]
+    file_info = report["files"]
+    cycles = report["dep_cycles"]
+    pkg_vars = report["package_vars"]
+
     nfunc = len(funcs)
     avg_comp = (sum(f["complexity"] for f in funcs) / nfunc) if nfunc else 0
-    big_funcs = [f for f in funcs if f["end_line"] - f["line"] > 80]
+    over15 = sum(1 for f in funcs if f["complexity"] > 15)
+    over10 = sum(1 for f in funcs if f["complexity"] > 10)
+    line_list = sorted(f["lines"] for f in funcs)
+    p90 = line_list[int(len(line_list) * 0.9)] if line_list else 0
+    max_lines = line_list[-1] if line_list else 0
 
-    # 行数分:1500-4000 最佳
-    if 1500 <= total_lines <= 4000:
-        line_score = 100
-    elif total_lines <= 0:
-        line_score = 0
-    else:
-        line_score = max(0, 100 - abs(total_lines - 2500) / 30)
+    total_lines = sum(f["lines"] for f in file_info)
+    max_pct = (max(f["lines"] for f in file_info) / total_lines * 100) if file_info and total_lines else 0
+    god_file = max(file_info, key=lambda f: f["lines"])["name"] if file_info else ""
+    nfiles = len(file_info)
+    n_cycles = sum(1 for c in cycles if len(c) > 1)
+    non_sentinel_vars = sum(1 for v in pkg_vars if not v.get("sentinel"))
 
-    # 复杂度分
+    # 复杂度分(40%)
     if avg_comp <= 2:
         comp_score = 100
     elif avg_comp <= 4:
@@ -198,15 +238,46 @@ def score_size(files):
         comp_score = 60
     else:
         comp_score = max(0, 60 - (avg_comp - 6) * 8)
+    comp_score = max(0, comp_score - min(over15, 15))
 
-    # 超长函数扣分
-    overlong_penalty = len(big_funcs) * 5
-    score = 0.6 * line_score + 0.4 * comp_score - min(overlong_penalty, 30)
+    # 函数行数分(25%)
+    func_line_score = max(0, 100 - max(0, p90 - 50))
+    if max_lines > 150:
+        func_line_score = max(0, func_line_score - 10)
+
+    # 模块划分分(20%)
+    modular_score = max(0, 100 - max(0, max_pct - 25) * 3)
+    if nfiles < 4 or nfiles > 14:
+        modular_score = max(0, modular_score - 10)
+
+    # 依赖健康分(15%)
+    dep_score = max(0, 100 - n_cycles * 20)
+    if non_sentinel_vars > 3:
+        dep_score = max(0, dep_score - (non_sentinel_vars - 3) * 3)
+
+    score = (0.40 * comp_score + 0.25 * func_line_score
+             + 0.20 * modular_score + 0.15 * dep_score)
     return max(0, min(100, round(score, 1))), {
-        "total_lines": total_lines, "code_lines": code_lines,
-        "functions": nfunc, "avg_complexity": round(avg_comp, 2),
-        "big_functions": [f["name"] for f in big_funcs],
-        "per_file": per_file,
+        "functions": nfunc,
+        "avg_complexity": round(avg_comp, 2),
+        "max_complexity": max((f["complexity"] for f in funcs), default=0),
+        "complex_over_15": over15,
+        "complex_over_10": over10,
+        "p90_func_lines": p90,
+        "max_func_lines": max_lines,
+        "total_lines": total_lines,
+        "files": nfiles,
+        "god_file": god_file,
+        "god_pct": round(max_pct, 1),
+        "dep_cycle_count": n_cycles,
+        "dep_cycles": [sorted(c) for c in cycles if len(c) > 1],
+        "pkg_vars": non_sentinel_vars,
+        "subscores": {
+            "complexity": round(comp_score, 1),
+            "func_lines": round(func_line_score, 1),
+            "modular": round(modular_score, 1),
+            "deps": round(dep_score, 1),
+        },
     }
 
 
@@ -492,27 +563,27 @@ files_cache: dict | None = None  # 在 main() 中赋值为 read_go_files() 的�
 
 # 各维度达标阈值(score 为 0.0-1.0)
 THRESHOLDS = {
-    "size": 0.60,
+    "architecture": 0.50,
     "testing": 0.70,
     "correctness": 1.0,
     "health": 0.90,
     "performance": 0.70,
 }
 
-DIM_ORDER = ["size", "testing", "correctness", "health", "performance"]
+DIM_ORDER = ["architecture", "testing", "correctness", "health", "performance"]
 
 # 各维度权重(和为 1.0)
 WEIGHTS = {
-    "size": 0.10,
-    "testing": 0.30,
+    "architecture": 0.30,
+    "testing": 0.20,
     "correctness": 0.30,
     "health": 0.10,
-    "performance": 0.20,
+    "performance": 0.10,
 }
 
 
 BRIEF_REASONS = {
-    "size": "代码规模或复杂度未达标",
+    "architecture": "代码架构未达标",
     "testing": "覆盖率没达标",
     "correctness": "黑盒测试未全部通过",
     "health": "代码健康度未达标",
@@ -534,18 +605,20 @@ def _list_summary(items, limit=5):
 def dim_reason(name, data):
     """按维度生成未达标时的详细原因,尽量带上具体数据。"""
     parts = [BRIEF_REASONS[name]]
-    if name == "size":
+    if name == "architecture":
         parts.append(
-            f"total_lines={data.get('total_lines')} "
-            f"funcs={data.get('functions')} "
-            f"avg_complexity={data.get('avg_complexity')}"
+            f"avg_complexity={data.get('avg_complexity')} "
+            f"p90_lines={data.get('p90_func_lines')} "
+            f"files={data.get('files')}"
         )
-        if data.get("big_functions"):
-            parts.append(f"big_funcs=[{_list_summary(data['big_functions'])}]")
-        per = data.get("per_file") or {}
-        if per:
-            files = ", ".join(f"{k}:{v['code']}" for k, v in list(per.items())[:8])
-            parts.append(f"code_lines/files={{{files}}}")
+        if data.get("god_file"):
+            parts.append(f"god_file={data['god_file']}({data.get('god_pct')}%)")
+        if data.get("dep_cycle_count"):
+            parts.append(f"dep_cycles={data['dep_cycle_count']}")
+        if data.get("complex_over_15"):
+            parts.append(f"comp>15={data['complex_over_15']}")
+        if data.get("pkg_vars", 0) > 3:
+            parts.append(f"pkg_vars={data['pkg_vars']}")
     elif name == "testing":
         cov = data.get("coverage")
         parts.append(
@@ -599,10 +672,10 @@ def main():
 
     results = {}
 
-    s, d = score_size(files_cache)
-    results["size"] = (s, d)
+    s, d = score_architecture(files_cache, use_go)
+    results["architecture"] = (s, d)
     if not quiet:
-        print(f"size        : {s}")
+        print(f"architecture: {s}")
 
     s, d = score_testing(use_go)
     results["testing"] = (s, d)
