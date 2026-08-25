@@ -1,6 +1,6 @@
 module eval
 
-go 1.24
+go 1.24.4
 
 require dymsg v0.0.0
 

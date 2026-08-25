@@ -26,7 +26,7 @@
 
 ## 验收标准
 
-`go test ./...` 全部通过。
+会使用 replace dymsg => /workspace 的方式引用该包。
 
 # dymsg 规范
 
