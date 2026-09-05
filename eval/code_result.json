@@ -1,1 +1,0 @@
-{"score": 0.75, "resolved": false, "reason": "correctness: 黑盒测试未全部通过 | pass=114/125 fail=11 | failed=[TestParseSchemaMalformed/message_null_schema, TestParseSchemaMalformed, TestAppend, TestClearPathIdempotentWhenParentUnset, TestClearRepeatedElement, ...(+6)]; performance: 性能未达标 | time=53.8 mem=59.4 | over_alloc=[BenchmarkEncodeJSON(185>168.2)]"}
