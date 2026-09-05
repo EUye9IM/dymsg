@@ -5,108 +5,216 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"math"
 	"strconv"
 )
 
 // EncodeJSON encodes the message as a JSON object, emitting fields in schema
 // declaration order and omitting unset fields.
 func (m *Message) EncodeJSON() ([]byte, error) {
-	var buf bytes.Buffer
-	if err := appendJSONMessage(&buf, m); err != nil {
+	buf, err := appendJSONMessage(make([]byte, 0, 128), m)
+	if err != nil {
 		return nil, err
 	}
-	return buf.Bytes(), nil
+	return buf, nil
 }
 
-func appendJSONMessage(buf *bytes.Buffer, m *Message) error {
-	buf.WriteByte('{')
+func appendJSONMessage(buf []byte, m *Message) ([]byte, error) {
+	buf = append(buf, '{')
 	first := true
 	for i, fs := range m.schema.fields {
 		if !m.set[i] {
 			continue
 		}
 		if !first {
-			buf.WriteByte(',')
+			buf = append(buf, ',')
 		}
 		first = false
-		buf.Write(appendJSONString(nil, fs.Name))
-		buf.WriteByte(':')
-		if err := appendJSONValue(buf, fs, m.vals[i]); err != nil {
-			return err
+		buf = appendJSONString(buf, fs.Name)
+		buf = append(buf, ':')
+		var err error
+		if buf, err = appendJSONValue(buf, fs, m.vals[i]); err != nil {
+			return nil, err
 		}
 	}
-	buf.WriteByte('}')
-	return nil
+	return append(buf, '}'), nil
 }
 
-func appendJSONValue(buf *bytes.Buffer, fs FieldSchema, val any) error {
+func appendJSONValue(buf []byte, fs FieldSchema, val any) ([]byte, error) {
 	if fs.Repeated {
 		switch fs.Type {
 		case FieldString:
-			buf.WriteByte('[')
-			s := val.([]string)
-			for i, e := range s {
+			buf = append(buf, '[')
+			for i, e := range val.([]string) {
 				if i > 0 {
-					buf.WriteByte(',')
+					buf = append(buf, ',')
 				}
-				buf.Write(appendJSONString(nil, e))
+				buf = appendJSONString(buf, e)
 			}
-			buf.WriteByte(']')
+			return append(buf, ']'), nil
 		case FieldMessage:
-			buf.WriteByte('[')
-			s := val.([]*Message)
-			for i, e := range s {
+			buf = append(buf, '[')
+			for i, e := range val.([]*Message) {
 				if i > 0 {
-					buf.WriteByte(',')
+					buf = append(buf, ',')
 				}
 				if e == nil {
-					buf.WriteString("null")
+					buf = append(buf, "null"...)
 					continue
 				}
-				if err := appendJSONMessage(buf, e); err != nil {
-					return err
+				var err error
+				if buf, err = appendJSONMessage(buf, e); err != nil {
+					return nil, err
 				}
 			}
-			buf.WriteByte(']')
+			return append(buf, ']'), nil
 		default:
-			b, err := json.Marshal(val)
-			if err != nil {
-				return ErrMalformedData
-			}
-			buf.Write(b)
+			return appendJSONScalarSlice(buf, fs.Type, val)
 		}
-		return nil
 	}
 
 	if fs.Type == FieldMessage {
 		mm, _ := val.(*Message)
 		if mm == nil {
-			buf.WriteString("null")
-			return nil
+			return append(buf, "null"...), nil
 		}
 		return appendJSONMessage(buf, mm)
 	}
+	return appendJSONScalar(buf, fs.Type, val)
+}
 
-	switch fs.Type {
+func appendJSONScalar(buf []byte, ft FieldType, val any) ([]byte, error) {
+	switch ft {
 	case FieldString:
-		buf.Write(appendJSONString(nil, val.(string)))
+		return appendJSONString(buf, val.(string)), nil
 	case FieldBytes:
-		b, _ := json.Marshal(val.([]byte))
-		buf.Write(b)
+		buf = append(buf, '"')
+		buf = base64.StdEncoding.AppendEncode(buf, val.([]byte))
+		return append(buf, '"'), nil
 	case FieldBool:
 		if val.(bool) {
-			buf.WriteString("true")
-		} else {
-			buf.WriteString("false")
+			return append(buf, "true"...), nil
+		}
+		return append(buf, "false"...), nil
+	case FieldInt32:
+		return strconv.AppendInt(buf, int64(val.(int32)), 10), nil
+	case FieldInt64:
+		return strconv.AppendInt(buf, val.(int64), 10), nil
+	case FieldUint32:
+		return strconv.AppendUint(buf, uint64(val.(uint32)), 10), nil
+	case FieldUint64:
+		return strconv.AppendUint(buf, val.(uint64), 10), nil
+	case FieldFloat:
+		return appendJSONFloat(buf, float64(val.(float32)), 32)
+	case FieldDouble:
+		return appendJSONFloat(buf, val.(float64), 64)
+	}
+	return buf, ErrMalformedData
+}
+
+func appendJSONScalarSlice(buf []byte, ft FieldType, val any) ([]byte, error) {
+	buf = append(buf, '[')
+	switch x := val.(type) {
+	case []int32:
+		for i, e := range x {
+			if i > 0 {
+				buf = append(buf, ',')
+			}
+			buf = strconv.AppendInt(buf, int64(e), 10)
+		}
+	case []int64:
+		for i, e := range x {
+			if i > 0 {
+				buf = append(buf, ',')
+			}
+			buf = strconv.AppendInt(buf, e, 10)
+		}
+	case []uint32:
+		for i, e := range x {
+			if i > 0 {
+				buf = append(buf, ',')
+			}
+			buf = strconv.AppendUint(buf, uint64(e), 10)
+		}
+	case []uint64:
+		for i, e := range x {
+			if i > 0 {
+				buf = append(buf, ',')
+			}
+			buf = strconv.AppendUint(buf, e, 10)
+		}
+	case []float32:
+		for i, e := range x {
+			if i > 0 {
+				buf = append(buf, ',')
+			}
+			var err error
+			if buf, err = appendJSONFloat(buf, float64(e), 32); err != nil {
+				return nil, err
+			}
+		}
+	case []float64:
+		for i, e := range x {
+			if i > 0 {
+				buf = append(buf, ',')
+			}
+			var err error
+			if buf, err = appendJSONFloat(buf, e, 64); err != nil {
+				return nil, err
+			}
+		}
+	case []bool:
+		for i, e := range x {
+			if i > 0 {
+				buf = append(buf, ',')
+			}
+			if e {
+				buf = append(buf, "true"...)
+			} else {
+				buf = append(buf, "false"...)
+			}
+		}
+	case [][]byte:
+		for i, b := range x {
+			if i > 0 {
+				buf = append(buf, ',')
+			}
+			buf = append(buf, '"')
+			buf = base64.StdEncoding.AppendEncode(buf, b)
+			buf = append(buf, '"')
 		}
 	default:
-		b, err := json.Marshal(val)
-		if err != nil {
-			return ErrMalformedData
-		}
-		buf.Write(b)
+		return nil, ErrMalformedData
 	}
-	return nil
+	return append(buf, ']'), nil
+}
+
+// appendJSONFloat appends f using the same formatting rules as encoding/json:
+// the shortest round-tripping representation, switching to exponent form for
+// very small or very large magnitudes. NaN and ±Inf are rejected because JSON
+// cannot represent them.
+func appendJSONFloat(buf []byte, f float64, bits int) ([]byte, error) {
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return nil, ErrMalformedData
+	}
+	abs := math.Abs(f)
+	format := byte('f')
+	if abs != 0 {
+		if bits == 64 && (abs < 1e-6 || abs >= 1e21) ||
+			bits == 32 && (float32(abs) < 1e-6 || float32(abs) >= 1e21) {
+			format = 'e'
+		}
+	}
+	buf = strconv.AppendFloat(buf, f, format, -1, bits)
+	if format == 'e' {
+		// Clean up e-09 to e-9, matching encoding/json.
+		n := len(buf)
+		if n >= 4 && buf[n-4] == 'e' && buf[n-3] == '-' && buf[n-2] == '0' {
+			buf[n-2] = buf[n-1]
+			buf = buf[:n-1]
+		}
+	}
+	return buf, nil
 }
 
 // DecodeJSON replaces the message contents from a JSON object.

@@ -17,7 +17,8 @@ func newMessage(s MessageSchema) *Message {
 
 // Get returns the value at path.
 func (m *Message) Get(path string) Value {
-	segs, err := parsePath(path)
+	var pbuf [8]pathSeg
+	segs, err := parsePathBuf(path, pbuf[:0])
 	if err != nil {
 		return Value{err: err}
 	}
@@ -81,7 +82,8 @@ func (m *Message) getValue(segs []pathSeg) Value {
 
 // Set assigns value at path.
 func (m *Message) Set(path string, value any) error {
-	segs, err := parsePath(path)
+	var pbuf [8]pathSeg
+	segs, err := parsePathBuf(path, pbuf[:0])
 	if err != nil {
 		return err
 	}
@@ -105,7 +107,8 @@ func (m *Message) Set(path string, value any) error {
 
 // Append appends one element to the repeated field at path.
 func (m *Message) Append(path string, value any) error {
-	segs, err := parsePath(path)
+	var pbuf [8]pathSeg
+	segs, err := parsePathBuf(path, pbuf[:0])
 	if err != nil {
 		return err
 	}
@@ -129,7 +132,8 @@ func (m *Message) Append(path string, value any) error {
 
 // Clear marks the field at path as unset.
 func (m *Message) Clear(path string) error {
-	segs, err := parsePath(path)
+	var pbuf [8]pathSeg
+	segs, err := parsePathBuf(path, pbuf[:0])
 	if err != nil {
 		return err
 	}

@@ -8,13 +8,15 @@ type pathSeg struct {
 	hasIdx bool
 }
 
-// parsePath parses a field path expression into segments. An empty path yields
-// nil segments (the message itself).
-func parsePath(path string) ([]pathSeg, error) {
+// parsePathBuf parses a field path expression into segments, appending to the
+// caller-provided buffer (which should have spare capacity) so that typical
+// paths need no heap allocation. An empty path yields no segments (the message
+// itself).
+func parsePathBuf(path string, buf []pathSeg) ([]pathSeg, error) {
 	if path == "" {
-		return nil, nil
+		return buf[:0], nil
 	}
-	var segs []pathSeg
+	segs := buf[:0]
 	pos := 0
 	n := len(path)
 	for pos < n {
